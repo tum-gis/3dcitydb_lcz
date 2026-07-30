@@ -1,0 +1,177 @@
+services:
+  # ------------------------------------------------------------------
+  # 3DCityDB v5 (PostgreSQL/PostGIS) — unmodified official image.
+  # ------------------------------------------------------------------
+  citydb:
+    image: 3dcitydb/3dcitydb-pg:5-alpine
+    container_name: citydb
+    environment:
+      POSTGRES_PASSWORD: ${CITYDB_PASSWORD:-changeMe}
+      SRID: ${CITYDB_SRID:-25832}
+    volumes:
+      - citydb-data:/var/lib/postgresql/data
+    ports:
+      - "${CITYDB_PORT:-5432}:5432"
+    healthcheck:
+      # Confirms not just "postgres is up" but that the (potentially
+      # lengthy) first-time 3DCityDB v5 schema creation has finished —
+      # lcz-init must not start against a half-initialized database.
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+    networks:
+      - citydb-net
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # LCZ setup: runs the four SQL scripts once, after citydb is healthy.
+  # Uses the plain official postgres image only for its psql client —
+  # no custom image build required. Runs to completion and exits; safe
+  # to leave in the compose file, `docker compose up` will not fail
+  # because of it (see idempotency guard in entrypoint.sh).
+  # ------------------------------------------------------------------
+  lcz-init:
+    image: postgres:18-alpine
+    container_name: lcz-init
+    depends_on:
+      citydb:
+        condition: service_healthy
+    environment:
+      PGHOST: citydb
+      PGPORT: 5432
+      PGDATABASE: postgres
+      PGUSER: postgres
+      PGPASSWORD: ${CITYDB_PASSWORD:-changeMe}
+      # Set to "true" to re-run setup even if the lcz schema already
+      # exists (e.g. after you've edited the SQL scripts during
+      # development). Leave unset/false in normal operation.
+      FORCE_REINIT: ${LCZ_FORCE_REINIT:-false}
+    volumes:
+      - ./sql:/sql:ro
+      - ./lcz-init/entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "-c", "cp /entrypoint.sh /tmp/entrypoint.sh && sed -i 's/\\r$//' /tmp/entrypoint.sh && exec /bin/sh /tmp/entrypoint.sh"]
+    networks:
+      - citydb-net
+    restart: "no"
+
+  # ------------------------------------------------------------------
+  # Automated pipeline, step 1: import every CityGML file found (
+  # recursively) in ./input_data. Runs once citydb is healthy and the
+  # LCZ schema/procedures are installed.
+  # ------------------------------------------------------------------
+  lcz-import:
+    image: 3dcitydb/citydb-tool:latest
+    container_name: lcz-import
+    depends_on:
+      citydb:
+        condition: service_healthy
+      lcz-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./input_data:/input_data:ro
+    command:
+      - import
+      - citygml
+      - -H
+      - citydb
+      - -d
+      - postgres
+      - -u
+      - postgres
+      - -p
+      - ${CITYDB_PASSWORD:-changeMe}
+      - /input_data
+    networks:
+      - citydb-net
+    restart: "no"
+
+  # ------------------------------------------------------------------
+  # Automated pipeline, step 2: run the LCZ calculation, then create
+  # the CityObjectGroups and enrich the city objects. Runs once the
+  # import has completed successfully.
+  # ------------------------------------------------------------------
+  lcz-run:
+    image: postgres:18-alpine
+    container_name: lcz-run
+    depends_on:
+      lcz-import:
+        condition: service_completed_successfully
+    environment:
+      PGHOST: citydb
+      PGPORT: 5432
+      PGDATABASE: postgres
+      PGUSER: postgres
+      PGPASSWORD: ${CITYDB_PASSWORD:-changeMe}
+    command:
+      - psql
+      - -v
+      - ON_ERROR_STOP=1
+      - -c
+      - CALL lcz.run_all();
+      - -c
+      - CALL lcz.citydb_export_groups();
+      - -c
+      - CALL lcz.citydb_enrich_city_objects();
+    networks:
+      - citydb-net
+    restart: "no"
+
+  # ------------------------------------------------------------------
+  # Automated pipeline, step 3: export the enriched city model. Runs
+  # once the LCZ calculation/enrichment has completed successfully.
+  # ------------------------------------------------------------------
+  lcz-export:
+    image: 3dcitydb/citydb-tool:latest
+    container_name: lcz-export
+    depends_on:
+      lcz-run:
+        condition: service_completed_successfully
+    volumes:
+      - ./output_data:/output_data
+    command:
+      - export
+      - citygml
+      - -H
+      - citydb
+      - -d
+      - postgres
+      - -u
+      - postgres
+      - -p
+      - ${CITYDB_PASSWORD:-changeMe}
+      - -o
+      - /output_data/LCZ_results.gml
+    networks:
+      - citydb-net
+    restart: "no"
+
+  # ------------------------------------------------------------------
+  # citydb-tool: optional convenience service for manual, ad-hoc
+  # import/export beyond the automated pipeline above.
+  # Not started by plain `docker compose up` (profile-gated). Invoke
+  # explicitly, e.g.:
+  #   docker compose run --rm citydb-tool import citygml /data/foo.gml
+  #   docker compose run --rm citydb-tool export citygml -o /data/out.gml
+  # ------------------------------------------------------------------
+  citydb-tool:
+    image: 3dcitydb/citydb-tool:latest
+    profiles: ["tools"]
+    environment:
+      CITYDB_HOST: citydb
+      CITYDB_PORT: 5432
+      CITYDB_NAME: postgres
+      CITYDB_USERNAME: postgres
+      CITYDB_PASSWORD: ${CITYDB_PASSWORD:-changeMe}
+    volumes:
+      - ./data:/data
+    networks:
+      - citydb-net
+
+networks:
+  citydb-net:
+    driver: bridge
+
+volumes:
+  citydb-data:
