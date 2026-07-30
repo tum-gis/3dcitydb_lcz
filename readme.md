@@ -1,1 +1,1 @@
-# Tool for calculatin Local Climate Zones based on 3DCityDB
+# Tool for calculating Local Climate Zones based on 3DCityDB
