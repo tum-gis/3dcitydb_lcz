@@ -2,7 +2,7 @@
 -- 04_citydb_enrich_city_objects.sql
 -- Enriches every top-level CityGML object that intersects an LCZ zone
 -- (lcz.lcz_map_dissolved) with its LCZ classification.
--
+--
 -- Handling objects that intersect MULTIPLE LCZ zones (e.g. a LandUse
 -- polygon, a road, a river, or a large vegetation patch that spans
 -- several of the dissolved, citywide LCZ zones): rather than picking a
