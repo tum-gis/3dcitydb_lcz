@@ -35,12 +35,14 @@ CREATE TABLE lcz.lcz_params (
 );
 
 INSERT INTO lcz.lcz_params (param_name, param_value) VALUES
-    ('boundary_buffer',          '25'),
+    ('boundary_buffer',          '60'),
     ('grid_resolution',          '10'),
     ('class_grid_resolution',    '100'),
     ('tree_pit_radius',          '2.0'),
     ('landuse_default_imperv',   '0.40'),
     ('svf_radius',               '60'),
+    ('svf_directions',           '8'),
+    ('svf_observer_height',    '2.0'),
     ('svf_ray_step',             '2'),
     ('tree_crown_ratio',         '0.35'),
     ('include_trees_in_svf',     'true'),
@@ -64,29 +66,28 @@ INSERT INTO lcz.lcz_params (param_name, param_value) VALUES
     ('height_norm_max',          '50.0'),
     ('ar_norm_min',              '0.1'),
     ('ar_norm_max',              '5.0'),
-    ('forest_cover_threshold',   '0.80');
+    ('forest_cover_threshold',   '0.80'),
+    ('terrain_grid_spacing',     '20'),
+    ('include_terrain_in_svf',   'false');
 
--- ================================================================
 -- Detect the projected SRID and store it in the parameter table
--- ================================================================
+
 DO $$
 DECLARE
     citydb_schema TEXT;
     detected_srid INTEGER;
     is_projected  BOOLEAN;
 BEGIN
-    -- Find the citydb schema that contains the 'database_srs' table
     SELECT table_schema INTO citydb_schema
     FROM information_schema.tables
     WHERE table_name = 'database_srs'
       AND table_schema NOT IN ('information_schema', 'pg_catalog', 'lcz')
     LIMIT 1;
 
-    -- Get any SRID from the 3DCityDB schema (v5 doesn't have is_3d)
     EXECUTE format('SELECT srid FROM %I.database_srs WHERE srid != 0 LIMIT 1', citydb_schema)
     INTO detected_srid;
 
-    -- Strictly validate that the SRID is a projected CRS (e.g., UTM)
+    -- validate that the SRID is a projected CRS (e.g., UTM)
     SELECT (srtext LIKE '%PROJCS%') INTO is_projected
     FROM spatial_ref_sys
     WHERE srid = detected_srid;
@@ -95,14 +96,13 @@ BEGIN
         RAISE EXCEPTION 'LCZ requires a projected coordinate system. Detected SRID % is geographic.', detected_srid;
     END IF;
 
-    -- Save the SRID into the parameter table
     INSERT INTO lcz.lcz_params (param_name, param_value)
     VALUES ('srid', detected_srid::text)
     ON CONFLICT (param_name) DO UPDATE SET param_value = EXCLUDED.param_value;
 
 END $$;
 
--- Shared geometric support tables (now SRID-free)
+-- Shared geometric support tables
 DROP TABLE IF EXISTS lcz.lcz_study_area_hull CASCADE;
 CREATE TABLE lcz.lcz_study_area_hull (
     id   SERIAL PRIMARY KEY,
@@ -293,15 +293,24 @@ CREATE TABLE lcz.lcz_svf_ray_dictionary (
     dx           NUMERIC,
     dy           NUMERIC
 );
+
 INSERT INTO lcz.lcz_svf_ray_dictionary VALUES
-    (1, 0, 1),
-    (2, 0.707, 0.707),
-    (3, 1, 0),
-    (4, 0.707, -0.707),
-    (5, 0, -1),
-    (6, -0.707, -0.707),
-    (7, -1, 0),
-    (8, -0.707, 0.707);
+    (1,   0.000,  1.000),
+    (2,   0.707,  0.707),
+    (3,   1.000,  0.000),
+    (4,   0.707, -0.707),
+    (5,   0.000, -1.000),
+    (6,  -0.707, -0.707),
+    (7,  -1.000,  0.000),
+    (8,  -0.707,  0.707),
+    (9,   0.383,  0.924),
+    (10,  0.924,  0.383),
+    (11,  0.924, -0.383),
+    (12,  0.383, -0.924),
+    (13, -0.383, -0.924),
+    (14, -0.924, -0.383),
+    (15, -0.924,  0.383),
+    (16, -0.383,  0.924);
 
 DROP TABLE IF EXISTS lcz.lcz_svf_buildings CASCADE;
 CREATE TABLE lcz.lcz_svf_buildings (
@@ -361,6 +370,28 @@ SELECT
 FROM lcz.lcz_svf_map
 WITH NO DATA;
 CREATE INDEX idx_lcz_svf_mat_view_geom ON lcz.lcz_svf_mat_view USING GIST(geom);
+
+-- Terrain grid (for SVF terrain obstacle)
+DROP TABLE IF EXISTS lcz.lcz_terrain_grid CASCADE;
+CREATE TABLE lcz.lcz_terrain_grid (
+    gx   INTEGER,
+    gy   INTEGER,
+    z    NUMERIC,
+    geom geometry(POINT),
+    PRIMARY KEY (gx, gy)
+);
+CREATE INDEX idx_lcz_terrain_grid_geom ON lcz.lcz_terrain_grid USING GIST(geom);
+
+-- Terrain SVF results (one row per grid point per direction)
+DROP TABLE IF EXISTS lcz.lcz_svf_terrain_results CASCADE;
+CREATE TABLE lcz.lcz_svf_terrain_results (
+    gx           INTEGER,
+    gy           INTEGER,
+    direction_id INTEGER,
+    max_alpha    NUMERIC,
+    PRIMARY KEY (gx, gy, direction_id)
+);
+
 
 -- Phase 6: Aspect Ratio tables
 DROP TABLE IF EXISTS lcz.lcz_ar_facade CASCADE;
@@ -581,10 +612,8 @@ CREATE TABLE lcz.lcz_run_steps (
     error_message   TEXT
 );
 
--- ================================================================
 -- Configurable land‑use → impervious coefficient lookup table
 -- (Hybrid approach: numeric class + usage key, with few text exceptions)
--- ================================================================
 
 DROP TABLE IF EXISTS lcz.lcz_landuse_impervious CASCADE;
 CREATE TABLE lcz.lcz_landuse_impervious (
@@ -595,9 +624,11 @@ CREATE TABLE lcz.lcz_landuse_impervious (
     imperv_coeff  NUMERIC(4,2) NOT NULL
 );
 
--- ================================================================
+CREATE UNIQUE INDEX uq_lcz_landuse_impervious
+ON lcz.lcz_landuse_impervious (class_code, COALESCE(usage_code, ''), COALESCE(bez_text, ''));
+
 -- Generic class fallback (when even usage is unknown)
--- ================================================================
+
 INSERT INTO lcz.lcz_landuse_impervious (class_code, usage_code, bez_text, imperv_coeff) VALUES
 ('1000', NULL, NULL, 0.40),
 ('1100', NULL, NULL, 0.50),
@@ -605,9 +636,9 @@ INSERT INTO lcz.lcz_landuse_impervious (class_code, usage_code, bez_text, imperv
 ('3000', NULL, NULL, 0.10),
 ('4000', NULL, NULL, 0.00);
 
--- ================================================================
+
 -- Normalised defaults per USAGE (bez_text = NULL)
--- ================================================================
+
 INSERT INTO lcz.lcz_landuse_impervious (class_code, usage_code, bez_text, imperv_coeff) VALUES
 ('1000', '1020', NULL, 0.60),   -- industrial/commercial default
 ('1000', '1030', NULL, 0.40),   -- mixed use
@@ -631,22 +662,19 @@ INSERT INTO lcz.lcz_landuse_impervious (class_code, usage_code, bez_text, imperv
 ('4000', '4010', NULL, 0.00),   -- flowing water
 ('4000', '4020', NULL, 0.00);   -- standing water
 
--- ================================================================
 -- EXCEPTIONS (bez_text is the specific German text)
--- ================================================================
 
--- usage 1020 exceptions (original, must not be lost)
+-- usage 1020 exceptions
 INSERT INTO lcz.lcz_landuse_impervious (class_code, usage_code, bez_text, imperv_coeff) VALUES
 ('1000', '1020', 'Gärtnerei', 0.20),
 ('1000', '1020', 'Deponie (oberirdisch)', 0.20);
 
--- usage 1130 exceptions (existing)
+-- usage 1130 exceptions 
 INSERT INTO lcz.lcz_landuse_impervious (class_code, usage_code, bez_text, imperv_coeff) VALUES
 ('1000', '1130', 'Golf', 0.01),
 ('1000', '1130', 'Schwimmen', 0.50),
 ('1000', '1130', 'Wochenend- und Ferienhausfläche', 0.10);
 
--- New exceptions for existing usage codes (yellow rows)
 INSERT INTO lcz.lcz_landuse_impervious (class_code, usage_code, bez_text, imperv_coeff) VALUES
 -- usage 1020 (industrial/commercial)
 ('1000', '1020', 'Werft', 0.65),
@@ -663,7 +691,7 @@ INSERT INTO lcz.lcz_landuse_impervious (class_code, usage_code, bez_text, imperv
 ('2000', '2030', 'Regionalflughafen', 0.31),
 ('2000', '2030', 'Internationaler Flughafen', 0.31);
 
--- New usage defaults for yellow‑row codes (class + usage, bez_text = NULL)
+-- Other usage (class + usage, bez_text = NULL)
 INSERT INTO lcz.lcz_landuse_impervious (class_code, usage_code, bez_text, imperv_coeff) VALUES
 ('1000', '1060', NULL, 0.50),   -- Halde, Deponie (untertägig) – mix of sealed waste areas
 ('1000', '1070', NULL, 0.50),   -- Bergbaubetrieb – mining
@@ -672,26 +700,31 @@ INSERT INTO lcz.lcz_landuse_impervious (class_code, usage_code, bez_text, imperv
 ('1100', '3070', NULL, 0.00),   -- Sumpf (swamp)
 ('4000', '4030', NULL, 0.00);   -- Hafenbecken (harbour basin)
 
--- Additional specific exceptions for new bez under existing usage defaults
+-- Additional specific exceptions
 INSERT INTO lcz.lcz_landuse_impervious (class_code, usage_code, bez_text, imperv_coeff) VALUES
 ('1000', '1060', 'Deponie (untertägig)', 0.20),   -- engineered landfill
 ('1000', '1060', 'Halde', 0.02);                  -- natural rock/gravel spoil heap
 
 COMMIT;
 
--- ================================================================
--- CLASSIFICATION VIEW (created dynamically with the correct SRID)
--- ================================================================
+
+-- CLASSIFICATION VIEW
 
 DO $$
 DECLARE
     v_srid INTEGER;
+    v_class_grid_res INTEGER;
     citydb_schema TEXT;
 BEGIN
-    -- retrieve the projected SRID we stored earlier
+    -- retrieve the projected SRID 
     SELECT param_value::integer INTO v_srid
     FROM lcz.lcz_params
     WHERE param_name = 'srid';
+
+    -- retrieve the LCZ classification grid resolution (default 100)
+    SELECT param_value::integer INTO v_class_grid_res
+    FROM lcz.lcz_params
+    WHERE param_name = 'class_grid_resolution';
 
     -- detect the citydb schema
     SELECT table_schema INTO citydb_schema
@@ -700,10 +733,8 @@ BEGIN
       AND table_schema NOT IN ('information_schema', 'pg_catalog', 'lcz')
     LIMIT 1;
 
-    -- set search path so the view can find the tables
     EXECUTE format('SET search_path = %I, lcz, public;', citydb_schema);
 
-    -- drop old version if it exists
     DROP MATERIALIZED VIEW IF EXISTS lcz.lcz_classification CASCADE;
 
     -- create the view with the correct SRID and explicit schema bindings
@@ -712,23 +743,23 @@ BEGIN
         WITH    
         water_mask AS (
             SELECT DISTINCT
-                floor(gx / 100) * 100 AS gx,
-                floor(gy / 100) * 100 AS gy
-            FROM (SELECT DISTINCT floor(gx/100)*100 AS gx, floor(gy/100)*100 AS gy FROM lcz.lcz_grid) g
+                floor(gx / %s) * %s AS gx,
+                floor(gy / %s) * %s AS gy
+            FROM (SELECT DISTINCT floor(gx/%s)*%s AS gx, floor(gy/%s)*%s AS gy FROM lcz.lcz_grid) g
             JOIN %I.feature f ON f.objectclass_id = 300
             JOIN %I.property p ON p.feature_id = f.id
                            AND p.name = ''class''
                            AND p.val_string = ''4000''
             JOIN %I.geometry_data gd ON gd.feature_id = f.id
             WHERE ST_Intersects(
-                    ST_SetSRID(ST_MakeEnvelope(floor(gx/100)*100, floor(gy/100)*100,
-                                                floor(gx/100)*100+100, floor(gy/100)*100+100), %s),
+                    ST_SetSRID(ST_MakeEnvelope(floor(gx/%s)*%s, floor(gy/%s)*%s,
+                                                floor(gx/%s)*%s + %s, floor(gy/%s)*%s + %s), %s),
                     ST_Force2D(gd.geometry)
                   )
             GROUP BY 1,2
             HAVING SUM(ST_Area(ST_Intersection(
-                    ST_SetSRID(ST_MakeEnvelope(floor(gx/100)*100, floor(gy/100)*100,
-                                                floor(gx/100)*100+100, floor(gy/100)*100+100), %s),
+                    ST_SetSRID(ST_MakeEnvelope(floor(gx/%s)*%s, floor(gy/%s)*%s,
+                                                floor(gx/%s)*%s + %s, floor(gy/%s)*%s + %s), %s),
                     ST_Force2D(gd.geometry)
                 ))) > 3000
         ),
@@ -746,8 +777,10 @@ BEGIN
                         / NULLIF((SELECT param_value::numeric FROM lcz.lcz_params WHERE param_name=''psf_norm_max'') - (SELECT param_value::numeric FROM lcz.lcz_params WHERE param_name=''psf_norm_min''), 0))) AS n_psf,
                 GREATEST(0.0, LEAST(1.0, (height - (SELECT param_value::numeric FROM lcz.lcz_params WHERE param_name=''height_norm_min''))
                         / NULLIF((SELECT param_value::numeric FROM lcz.lcz_params WHERE param_name=''height_norm_max'') - (SELECT param_value::numeric FROM lcz.lcz_params WHERE param_name=''height_norm_min''), 0))) AS n_height,
-                GREATEST(0.0, LEAST(1.0, (ar    - (SELECT param_value::numeric FROM lcz.lcz_params WHERE param_name=''ar_norm_min''))
-                        / NULLIF((SELECT param_value::numeric FROM lcz.lcz_params WHERE param_name=''ar_norm_max'') - (SELECT param_value::numeric FROM lcz.lcz_params WHERE param_name=''ar_norm_min''), 0))) AS n_ar,
+                CASE WHEN ar IS NULL THEN NULL
+     ELSE GREATEST(0.0, LEAST(1.0, (ar - (SELECT param_value::numeric FROM lcz.lcz_params WHERE param_name=''ar_norm_min''))
+          / NULLIF((SELECT param_value::numeric FROM lcz.lcz_params WHERE param_name=''ar_norm_max'') - (SELECT param_value::numeric FROM lcz.lcz_params WHERE param_name=''ar_norm_min''), 0)))
+END AS n_ar,
                 bsf, psf
             FROM lcz.lcz_100m_params
         ),
@@ -765,7 +798,7 @@ BEGIN
                 GREATEST(0.0, LEAST(1.0, (h_mid  - (SELECT param_value::numeric FROM lcz.lcz_params WHERE param_name=''height_norm_min''))
                         / NULLIF((SELECT param_value::numeric FROM lcz.lcz_params WHERE param_name=''height_norm_max'') - (SELECT param_value::numeric FROM lcz.lcz_params WHERE param_name=''height_norm_min''), 0))) AS r_height,
                 GREATEST(0.0, LEAST(1.0, (ar_mid - (SELECT param_value::numeric FROM lcz.lcz_params WHERE param_name=''ar_norm_min''))
-                        / NULLIF((SELECT param_value::numeric FROM lcz.lcz_params WHERE param_name=''ar_norm_max'') - (SELECT param_value::numeric FROM lcz.lcz_params WHERE param_name=''ar_norm_min''), 0))) AS r_ar
+        / NULLIF((SELECT param_value::numeric FROM lcz.lcz_params WHERE param_name=''ar_norm_max'') - (SELECT param_value::numeric FROM lcz.lcz_params WHERE param_name=''ar_norm_min''), 0))) AS r_ar
             FROM lcz.lcz_reference
         ),
         distances AS (
@@ -778,36 +811,48 @@ BEGIN
                     (SELECT param_value::numeric FROM lcz.lcz_params WHERE param_name=''isf_weight'')    * POWER(c.n_isf    - r.r_isf,    2) +
                     (SELECT param_value::numeric FROM lcz.lcz_params WHERE param_name=''psf_weight'')    * POWER(c.n_psf    - r.r_psf,    2) +
                     (SELECT param_value::numeric FROM lcz.lcz_params WHERE param_name=''height_weight'') * POWER(c.n_height - r.r_height, 2) +
-                    (SELECT param_value::numeric FROM lcz.lcz_params WHERE param_name=''ar_weight'')     * POWER(c.n_ar     - r.r_ar,     2)
+                    COALESCE((SELECT param_value::numeric FROM lcz.lcz_params WHERE param_name=''ar_weight'') * POWER(c.n_ar - r.r_ar, 2), 0)
                 ) AS weighted_dist_sq
             FROM norm_cells c
             CROSS JOIN norm_ref r
+            -- BSF < 0.10 falls below the range of every built LCZ class
+            -- in Stewart & Oke (2012, Table 3). Restrict to land cover classes.
+            WHERE c.bsf >= 0.10 OR r.lcz_class >= 11
         ),
         ranked AS (
             SELECT DISTINCT ON (gx, gy)
                 gx, gy, geom, bsf, psf, lcz_class, lcz_name, weighted_dist_sq
             FROM distances
-            ORDER BY gx, gy, weighted_dist_sq
+            -- tie rule: lower class number wins when distances are equal
+            ORDER BY gx, gy, weighted_dist_sq, lcz_class
         )
         SELECT
             r.gx, r.gy, r.geom,
             CASE
-                WHEN w.gx IS NOT NULL AND r.bsf = 0 AND r.psf > 0.80 THEN 17
-                WHEN r.lcz_class IN (9,10) AND r.bsf < 0.10 AND r.psf > 0.50 THEN 12
-                ELSE r.lcz_class
-            END AS lcz_class,
-            CASE
-                WHEN w.gx IS NOT NULL AND r.bsf = 0 AND r.psf > 0.80 THEN ''Water''
-                WHEN r.lcz_class IN (9,10) AND r.bsf < 0.10 AND r.psf > 0.50 THEN ''Scattered trees''
-                ELSE r.lcz_name
-            END AS lcz_name,
+            WHEN w.gx IS NOT NULL AND r.bsf = 0 AND r.psf > 0.80 THEN 17
+            WHEN r.lcz_class = 17 AND w.gx IS NULL THEN 14
+            WHEN r.lcz_class IN (9,10) AND r.bsf < 0.10 AND r.psf > 0.50 THEN 12
+            ELSE r.lcz_class
+        END AS lcz_class,
+        CASE
+            WHEN w.gx IS NOT NULL AND r.bsf = 0 AND r.psf > 0.80 THEN ''Water''
+            WHEN r.lcz_class = 17 AND w.gx IS NULL THEN ''Low plants''
+            WHEN r.lcz_class IN (9,10) AND r.bsf < 0.10 AND r.psf > 0.50 THEN ''Scattered trees''
+            ELSE r.lcz_name
+        END AS lcz_name,
             r.weighted_dist_sq AS distance_sq
         FROM ranked r
         LEFT JOIN water_mask w ON r.gx = w.gx AND r.gy = w.gy
         WITH DATA;
-    ', citydb_schema, citydb_schema, citydb_schema, v_srid, v_srid);
-
-    -- add spatial index
-    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_lcz_classification_geom ON lcz.lcz_classification USING GIST(geom);';
-
+    ', 
+    v_class_grid_res, v_class_grid_res, v_class_grid_res, v_class_grid_res,
+    v_class_grid_res, v_class_grid_res, v_class_grid_res, v_class_grid_res,
+    citydb_schema, citydb_schema, citydb_schema,
+    v_class_grid_res, v_class_grid_res, v_class_grid_res, v_class_grid_res,
+    v_class_grid_res, v_class_grid_res, v_class_grid_res, v_class_grid_res,
+    v_class_grid_res, v_class_grid_res, v_srid,
+    v_class_grid_res, v_class_grid_res, v_class_grid_res, v_class_grid_res,
+    v_class_grid_res, v_class_grid_res, v_class_grid_res, v_class_grid_res,
+    v_class_grid_res, v_class_grid_res, v_srid
+    );
 END $$;

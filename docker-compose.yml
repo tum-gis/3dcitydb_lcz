@@ -9,7 +9,7 @@ services:
       POSTGRES_PASSWORD: ${CITYDB_PASSWORD:-changeMe}
       SRID: ${CITYDB_SRID:-25832}
     volumes:
-      - citydb-data:/var/lib/postgresql/data
+      - citydb-data:/var/lib/postgresql
     ports:
       - "${CITYDB_PORT:-5432}:5432"
     healthcheck:

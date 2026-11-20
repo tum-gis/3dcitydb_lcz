@@ -1,4 +1,375 @@
-# Tool for calculating Local Climate Zones[^1] based on 3DCityDB[^2]
+# 3DCityDB Local Climate Zone (LCZ) Docker Tool
+
+This project provides a Docker-based workflow for importing CityGML data into 3DCityDB and calculating Local Climate Zones[^1] with 3DCityDB v5[^2]. The Docker Compose stack initializes the database, imports CityGML, runs the LCZ calculation, enriches the CityGML objects, and exports the result.
+
+## Contents
+
+- [Requirements](#requirements)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [Input data](#input-data)
+- [Pipeline](#pipeline)
+- [Common commands](#common-commands)
+- [Running parts of the pipeline manually](#running-parts-of-the-pipeline-manually)
+- [SQL setup variants](#sql-setup-variants)
+- [Database access](#database-access)
+- [Output](#output)
+- [Troubleshooting](#troubleshooting)
+- [Resetting the installation](#resetting-the-installation)
+
+## Requirements
+
+- Docker Engine or Docker Desktop
+- Docker Compose
+- CityGML/3DCityDB input data
+- A projected coordinate reference system (CRS)
+
+Windows PowerShell examples assume this repository is the current directory:
+
+```powershell
+cd C:\temp\LCZ\3dcitydb_lcz_docker
+```
+
+Confirm Docker is available:
+
+```powershell
+docker --version
+docker compose version
+```
+
+## Quick start
+
+1. Copy the example environment file:
+
+   ```powershell
+   Copy-Item .env.example .env
+   ```
+
+2. Open `.env` and set a secure database password and the intended projected SRID:
+
+   ```dotenv
+   CITYDB_PASSWORD=replace-with-a-secure-password
+   CITYDB_SRID=25832
+   CITYDB_PORT=5432
+   LCZ_FORCE_REINIT=false
+   ```
+
+3. Place CityGML files in [`input_data`](./input_data). Files are found recursively.
+
+4. Start the complete pipeline:
+
+   ```powershell
+   docker compose up -d
+   ```
+
+5. Check the progress:
+
+   ```powershell
+   docker compose ps -a
+   docker compose logs -f lcz-import
+   docker compose logs -f lcz-run
+   docker compose logs -f lcz-export
+   ```
+
+The generated result is written to [`output_data/LCZ_results.gml`](./output_data/LCZ_results.gml).
+
+## Configuration
+
+Configuration is read from `.env`.
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `CITYDB_PASSWORD` | `changeMe` | Password for the PostgreSQL `postgres` user and the password used by import/export tools |
+| `CITYDB_SRID` | `25832` | EPSG SRID used to initialize 3DCityDB; must be a projected CRS |
+| `CITYDB_PORT` | `5432` | Host port mapped to PostgreSQL's port 5432 |
+| `LCZ_FORCE_REINIT` | `false` | Set to `true` to rerun the LCZ setup SQL after editing the setup scripts |
+
+Keep `.env` private; it contains the database password and should not be committed to Git.
+
+The LCZ setup SQL stores the detected projected SRID in `lcz.lcz_params`. Geographic CRS values such as longitude/latitude CRSs are not supported by the calculation.
+
+## Input data
+
+Place CityGML files in `input_data`:
+
+```text
+input_data/
+  buildings.gml
+  trees.gml
+  landuse.gml
+```
+
+The importer searches recursively and imports every CityGML file it finds. The LCZ procedures expect active 3DCityDB features for at least:
+
+- Buildings
+- Ground surfaces
+- Roof surfaces
+- Wall surfaces
+- Land-use features
+- Solitary vegetation objects
+
+When the extended procedure pair is installed, required geometries and properties are checked by `lcz.check_input_data()` before the calculation starts.
+
+CityGML and 3DCityDB object data must be geometrically and semantically compatible with the configured SRID.
+
+## Pipeline
+
+Running `docker compose up -d` starts these services:
+
+1. **`citydb`**
+   - Starts PostgreSQL/PostGIS and 3DCityDB v5.
+   - Persists database data in the `citydb-data` Docker volume.
+
+2. **`lcz-init`**
+   - Waits for `citydb` to be healthy.
+   - Installs the `lcz` schema and procedures.
+   - Runs once unless `LCZ_FORCE_REINIT=true`.
+
+3. **`lcz-import`**
+   - Imports all CityGML files from `input_data` into 3DCityDB.
+
+4. **`lcz-run`**
+   - Calls `lcz.run_all()`.
+   - Creates LCZ export groups.
+   - Enriches the city objects with LCZ attributes.
+
+5. **`lcz-export`**
+   - Exports the enriched 3DCityDB model to `output_data/LCZ_results.gml`.
+
+`lcz-import`, `lcz-run`, and `lcz-export` exit after completing their tasks. `citydb` continues to run.
+
+## Common commands
+
+Start the complete pipeline:
+
+```powershell
+docker compose up -d
+```
+
+Start only the database and LCZ setup:
+
+```powershell
+docker compose up -d citydb lcz-init
+```
+
+Show container status:
+
+```powershell
+docker compose ps -a
+```
+
+Follow or inspect logs:
+
+```powershell
+docker compose logs -f citydb
+docker compose logs -f lcz-init
+docker compose logs -f lcz-import
+docker compose logs -f lcz-run
+docker compose logs -f lcz-export
+```
+
+Show the most recent log output:
+
+```powershell
+docker compose logs --tail=200 lcz-run
+```
+
+Stop containers without deleting database data:
+
+```powershell
+docker compose down
+```
+
+Restart only the LCZ pipeline after adding or replacing input data:
+
+```powershell
+docker compose rm -f lcz-import lcz-run lcz-export
+docker compose up -d
+```
+
+## Running parts of the pipeline manually
+
+With `citydb` running, open a SQL shell:
+
+```powershell
+docker compose exec citydb psql -U postgres -d postgres
+```
+
+Useful SQL commands:
+
+```sql
+-- Check the LCZ parameters
+SELECT * FROM lcz.lcz_params;
+
+-- Validate imported input data (available with 02_install_procedures2.sql)
+CALL lcz.check_input_data();
+
+-- Run the complete LCZ calculation
+CALL lcz.run_all();
+
+-- Create LCZ export groups
+CALL lcz.citydb_export_groups();
+
+-- Enrich city objects
+CALL lcz.citydb_enrich_city_objects();
+```
+
+In a normal PowerShell command, the calculation can also be started from outside PostgreSQL:
+
+```powershell
+docker compose run --rm lcz-run psql -v ON_ERROR_STOP=1 -c "CALL lcz.run_all();"
+```
+
+The optional `citydb-tool` service can be used for additional manual import/export operations:
+
+```powershell
+docker compose --profile tools run --rm citydb-tool import citygml /data/example.gml
+docker compose --profile tools run --rm citydb-tool export citygml -o /data/manual-export.gml
+```
+
+The `citydb-tool` service mounts [`data`](./data) at `/data`.
+
+## SQL setup variants
+
+Two setup and procedure pairs are included:
+
+| Variant | Setup | Procedures |
+|---|---|---|
+| Standard | [`01_admin_setup.sql`](./sql/01_admin_setup.sql) | [`02_install_procedures.sql`](./sql/02_install_procedures.sql) |
+| Extended/updated | [`01_admin_setup2.sql`](./sql/01_admin_setup2.sql) | [`02_install_procedures2.sql`](./sql/02_install_procedures2.sql) |
+
+The files ending in `2` are the extended variants. They add terrain-SVF support, 16 SVF directions, a configurable classification grid, input validation, and additional classification rules. They must be used together; do not mix an `admin_setup` file with procedures from a different pair.
+
+The current [`lcz-init/entrypoint.sh`](./lcz-init/entrypoint.sh) explicitly uses:
+
+- `01_admin_setup.sql`
+- `02_install_procedures.sql`
+- `03_citydb_groups.sql`
+- `04_citydb_enrich_city_objects.sql`
+
+To test the extended pair, change both SQL filenames in `lcz-init/entrypoint.sh`, set `LCZ_FORCE_REINIT=true`, and recreate the LCZ setup container:
+
+```dotenv
+LCZ_FORCE_REINIT=true
+```
+
+```powershell
+docker compose up -d --force-recreate lcz-init
+docker compose logs -f lcz-init
+```
+
+Afterward, set `LCZ_FORCE_REINIT=false` for normal operation.
+
+## Database access
+
+From the host, connect to PostgreSQL with a client such as pgAdmin or a PostgreSQL command-line tool:
+
+- Host: `localhost`
+- Port: value of `CITYDB_PORT`, default `5432`
+- Database: `postgres`
+- User: `postgres`
+- Password: value of `CITYDB_PASSWORD`
+
+Inside Docker, use:
+
+```powershell
+docker compose exec citydb psql -U postgres -d postgres
+```
+
+## Output
+
+The exported file is created here:
+
+```text
+output_data/LCZ_results.gml
+```
+
+The database also contains LCZ tables and views in the `lcz` schema, including `lcz_map`, `lcz_map_polygons`, `lcz_classification`, and run metadata tables.
+
+## Troubleshooting
+
+### `citydb` repeatedly restarts
+
+Inspect the database log:
+
+```powershell
+docker compose logs --tail=200 citydb
+```
+
+The original PostgreSQL data mount must be compatible with the installed PostgreSQL image. This Compose file mounts the persistent volume at `/var/lib/postgresql`, which is the PostgreSQL 18-compatible location.
+
+Do not change this mount if the existing database volume contains data. Do not use `docker compose down -v` unless you intentionally want to delete the database.
+
+### `No active Building features found`
+
+This means that CityGML input was not imported or contains no active Building features.
+
+Check:
+
+```powershell
+Get-ChildItem -Recurse .\input_data
+docker compose logs --tail=100 lcz-import
+```
+
+Place valid CityGML files in `input_data`, then reimport the data and rerun the pipeline.
+
+### LCZ setup is skipped
+
+`lcz-init` skips setup when the `lcz` schema already exists and `LCZ_FORCE_REINIT=false`.
+
+Set `LCZ_FORCE_REINIT=true`, recreate `lcz-init`, and set it back to `false` after setup:
+
+```powershell
+docker compose up -d --force-recreate lcz-init
+docker compose logs -f lcz-init
+```
+
+### Port 5432 is already occupied
+
+Change `CITYDB_PORT` in `.env`, for example:
+
+```dotenv
+CITYDB_PORT=55432
+```
+
+Then recreate the containers:
+
+```powershell
+docker compose down
+docker compose up -d
+```
+
+### A service has exited
+
+Inspect the status and exact error:
+
+```powershell
+docker compose ps -a
+docker compose logs --tail=200 <service-name>
+```
+
+Typical service names are `lcz-import`, `lcz-run`, `lcz-export`, `lcz-init`, and `citydb`.
+
+### Calculation fails because of missing properties or geometries
+
+With the extended procedure pair, run `CALL lcz.check_input_data();`. Otherwise, inspect `lcz-run` logs. The extended check validates object classes, properties, geometries, and land-use mappings. Input data must contain the properties and active features expected by the LCZ procedures.
+
+## Resetting the installation
+
+To stop the stack while preserving the database:
+
+```powershell
+docker compose down
+```
+
+To delete the database and start with an empty 3DCityDB installation:
+
+```powershell
+docker compose down -v
+docker compose up -d
+```
+
+Using `down -v` permanently removes imported CityGML data and the generated LCZ database contents. Create backups before resetting.
 
 [^1]: <https://doi.org/10.1175/BAMS-D-11-00019.1>
 [^2]: <https://3dcitydb.net>
