@@ -1,6 +1,6 @@
 # 3DCityDB Local Climate Zone (LCZ) Docker Tool
 
-This project provides a Docker-based workflow for importing CityGML data into 3DCityDB and calculating Local Climate Zones[^1] with 3DCityDB v5[^2]. The Docker Compose stack initializes the database, imports CityGML, runs the LCZ calculation, enriches the CityGML objects, and exports the result.
+This project provides a Docker-based workflow for importing CityGML data into 3DCityDB v5[^1] and calculating Local Climate Zones[^2] with 3DCityDB. The Docker Compose stack initializes the database, imports CityGML, runs the LCZ calculation, enriches the CityGML objects, and exports the result.
 
 ## Contents
 
@@ -11,7 +11,7 @@ This project provides a Docker-based workflow for importing CityGML data into 3D
 - [Pipeline](#pipeline)
 - [Common commands](#common-commands)
 - [Running parts of the pipeline manually](#running-parts-of-the-pipeline-manually)
-- [SQL setup variants](#sql-setup-variants)
+- [SQL setup](#sql-setup)
 - [Database access](#database-access)
 - [Output](#output)
 - [Troubleshooting](#troubleshooting)
@@ -21,8 +21,11 @@ This project provides a Docker-based workflow for importing CityGML data into 3D
 
 - Docker Engine or Docker Desktop
 - Docker Compose
-- CityGML/3DCityDB input data
-- A projected coordinate reference system (CRS)
+- CityGML input data with the following requirements:
+   - projected coordinate reference system (CRS) like EPSG:25832
+   - LOD2 buildings from Open Data Bayern [^3]
+   - landuse and trees (optional) as produced by the FME workspace that you find in the resources folder from ALKIS TN [^4], Einzelbäume [^5] (optional) and DGM1 [^5].
+   
 
 Windows PowerShell examples assume this repository is the current directory:
 
@@ -54,7 +57,7 @@ docker compose version
    LCZ_FORCE_REINIT=false
    ```
 
-3. Place CityGML files in [`input_data`](./input_data). Files are found recursively.
+3. Place CityGML files (see requirements) in [`input_data`](./input_data).
 
 4. Start the complete pipeline:
 
@@ -71,7 +74,7 @@ docker compose version
    docker compose logs -f lcz-export
    ```
 
-The generated result is written to [`output_data/LCZ_results.gml`](./output_data/LCZ_results.gml).
+The generated result is written as a single CityGML file to [`output_data/LCZ_results.gml`](./output_data/LCZ_results.gml).
 
 ## Configuration
 
@@ -105,12 +108,12 @@ The importer searches recursively and imports every CityGML file it finds. The L
 - Ground surfaces
 - Roof surfaces
 - Wall surfaces
-- Land-use features
-- Solitary vegetation objects
+- Land-use features with generic attributes as created by the FME workspace stored in the "resources" folder
+- Solitary vegetation objects as created by the FME workspace stored in the "resources" folder
 
-When the extended procedure pair is installed, required geometries and properties are checked by `lcz.check_input_data()` before the calculation starts.
+Required geometries and properties are checked automatically before the calculation starts.
 
-CityGML and 3DCityDB object data must be geometrically and semantically compatible with the configured SRID.
+CityGML and 3DCityDB object data must be compatible with the configured SRID.
 
 ## Pipeline
 
@@ -201,7 +204,7 @@ Useful SQL commands:
 -- Check the LCZ parameters
 SELECT * FROM lcz.lcz_params;
 
--- Validate imported input data (available with 02_install_procedures2.sql)
+-- Validate imported input data
 CALL lcz.check_input_data();
 
 -- Run the complete LCZ calculation
@@ -229,36 +232,21 @@ docker compose --profile tools run --rm citydb-tool export citygml -o /data/manu
 
 The `citydb-tool` service mounts [`data`](./data) at `/data`.
 
-## SQL setup variants
+## SQL setup
 
-Two setup and procedure pairs are included:
+The LCZ setup runs the SQL scripts listed in [`lcz-init/entrypoint.sh`](./lcz-init/entrypoint.sh), in this order:
 
-| Variant | Setup | Procedures |
-|---|---|---|
-| Standard | [`01_admin_setup.sql`](./sql/01_admin_setup.sql) | [`02_install_procedures.sql`](./sql/02_install_procedures.sql) |
-| Extended/updated | [`01_admin_setup2.sql`](./sql/01_admin_setup2.sql) | [`02_install_procedures2.sql`](./sql/02_install_procedures2.sql) |
+1. [`01_admin_setup.sql`](./sql/01_admin_setup.sql)
+2. [`02_install_procedures.sql`](./sql/02_install_procedures.sql)
+3. [`03_citydb_groups.sql`](./sql/03_citydb_groups.sql)
+4. [`04_citydb_enrich_city_objects.sql`](./sql/04_citydb_enrich_city_objects.sql)
 
-The files ending in `2` are the extended variants. They add terrain-SVF support, 16 SVF directions, a configurable classification grid, input validation, and additional classification rules. They must be used together; do not mix an `admin_setup` file with procedures from a different pair.
-
-The current [`lcz-init/entrypoint.sh`](./lcz-init/entrypoint.sh) explicitly uses:
-
-- `01_admin_setup.sql`
-- `02_install_procedures.sql`
-- `03_citydb_groups.sql`
-- `04_citydb_enrich_city_objects.sql`
-
-To test the extended pair, change both SQL filenames in `lcz-init/entrypoint.sh`, set `LCZ_FORCE_REINIT=true`, and recreate the LCZ setup container:
-
-```dotenv
-LCZ_FORCE_REINIT=true
-```
+To rerun the setup after changing these scripts, set `LCZ_FORCE_REINIT=true` and recreate the setup container. Set it back to `false` afterward:
 
 ```powershell
 docker compose up -d --force-recreate lcz-init
 docker compose logs -f lcz-init
 ```
-
-Afterward, set `LCZ_FORCE_REINIT=false` for normal operation.
 
 ## Database access
 
@@ -352,7 +340,7 @@ Typical service names are `lcz-import`, `lcz-run`, `lcz-export`, `lcz-init`, and
 
 ### Calculation fails because of missing properties or geometries
 
-With the extended procedure pair, run `CALL lcz.check_input_data();`. Otherwise, inspect `lcz-run` logs. The extended check validates object classes, properties, geometries, and land-use mappings. Input data must contain the properties and active features expected by the LCZ procedures.
+Run `CALL lcz.check_input_data();` to validate the input data. The check validates object classes, properties, geometries, and land-use mappings. Input data must contain the properties and active features expected by the LCZ procedures.
 
 ## Resetting the installation
 
@@ -371,5 +359,9 @@ docker compose up -d
 
 Using `down -v` permanently removes imported CityGML data and the generated LCZ database contents. Create backups before resetting.
 
-[^1]: <https://doi.org/10.1175/BAMS-D-11-00019.1>
-[^2]: <https://3dcitydb.net>
+[^1]: <https://3dcitydb.net>
+[^2]: <https://doi.org/10.1175/BAMS-D-11-00019.1>
+[^3]: <https://geodaten.bayern.de/opengeodata/OpenDataDetail.html?pn=lod2>
+[^4]: <https://geodaten.bayern.de/opengeodata/OpenDataDetail.html?pn=tatsaechlichenutzung>
+[^5]: <https://geodaten.bayern.de/opengeodata/OpenDataDetail.html?pn=einzelbaeume>
+[^6]: <https://geodaten.bayern.de/opengeodata/OpenDataDetail.html?pn=dgm1>
