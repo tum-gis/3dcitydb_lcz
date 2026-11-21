@@ -15,6 +15,7 @@ This project provides a Docker-based workflow for importing CityGML data into 3D
 - [Calculation parameters](#calculation-parameters)
 - [Database access](#database-access)
 - [Output](#output)
+- [Detailed result data](#detailed-result-data)
 - [Troubleshooting](#troubleshooting)
 - [Resetting the installation](#resetting-the-installation)
 
@@ -332,7 +333,136 @@ The exported file is created here:
 output_data/LCZ_results.gml
 ```
 
-The database also contains LCZ tables and views in the `lcz` schema, including `lcz_map`, `lcz_map_polygons`, `lcz_classification`, and run metadata tables.
+This is a CityGML file in the configured projected coordinate reference system (EPSG:25832 by default). It contains:
+
+- The original imported CityGML objects.
+- One `CityObjectGroup` for every LCZ class represented in the dissolved result map.
+- The LCZ class and name as generic attributes on the exported groups.
+- LCZ generic attributes on top-level CityGML objects that intersect an LCZ zone.
+
+The generated output is therefore a CityGML file, including both zone polygons and the object classifications derived from them.
+
+## Detailed result data
+
+### LCZ zone groups
+
+The dissolved LCZ result is stored in `lcz.lcz_map_dissolved` and exported as 3DCityDB `CityObjectGroup` features. Each group has an object ID of the form:
+
+```text
+LCZ_<two-digit class>_<LCZ name>
+```
+
+For example:
+
+```text
+LCZ_05_Open_mid_rise
+LCZ_11_Dense_trees
+LCZ_17_Water
+```
+
+Every zone group contains the following generic attributes:
+
+| Attribute | Value |
+|---|---|
+| `lcz_class` | LCZ class number |
+| `lcz_name` | English LCZ class name |
+
+The group geometry is a dissolved, 2D/3D-compatible `MultiPolygon` of the 100 m LCZ class cells for that class. The members of a group are the imported 3DCityDB objects whose envelope or footprint intersects that group's polygon. Consequently, an object can be a member of more than one LCZ group.
+
+### Attributes attached to CityGML objects
+
+Top-level CityGML objects are enriched with ranked generic attributes. Sub-features such as boundary surfaces and openings are not enriched separately.
+
+For an object intersecting one or more LCZ zones, the exported attributes describe the relevant zones from largest to smallest overlap:
+
+| Attribute pattern | Meaning |
+|---|---|
+| `lcz_zone_count` | Number of LCZ zones intersected by the object |
+| `lcz_class_1`, `lcz_class_2`, ... | LCZ class number, ranked by overlap |
+| `lcz_name_1`, `lcz_name_2`, ... | English LCZ name, ranked by overlap |
+| `lcz_share_pct_1`, `lcz_share_pct_2`, ... | Overlap share of the object, in percent |
+
+Rank 1 is always the dominant or largest-overlap zone. For area features, the share is based on the intersection area relative to the feature footprint; for line features, it is based on intersection length; for point or degenerate geometries, no area splitting is possible and a 100 percent share is assigned.
+
+Example:
+
+```text
+lcz_zone_count = 2
+lcz_class_1 = 6
+lcz_name_1 = Open low-rise
+lcz_share_pct_1 = 72.4
+lcz_class_2 = 9
+lcz_name_2 = Sparsely built
+lcz_share_pct_2 = 27.6
+```
+
+The generated GML still contains the original CityGML geometry and properties. The LCZ values are additional generic attributes and do not replace the source objects.
+
+### LCZ grid and calculation tables
+
+The database contains the intermediate and final LCZ values in the `lcz` schema:
+
+| Table or view | Contents |
+|---|---|
+| `lcz.lcz_grid` | Shared analysis grid points |
+| `lcz.lcz_map` | Final 100 m grid classification for every cell |
+| `lcz.lcz_map_polygons` | Final grid classification as 100 m square polygons |
+| `lcz.lcz_map_dissolved` | One dissolved `MultiPolygon` per LCZ class |
+| `lcz.lcz_classification` | Materialized grid classification and parameter values |
+| `lcz.lcz_bsf_map` | Building surface fraction by grid point |
+| `lcz.lcz_isf_map` | Impervious surface fraction by grid point |
+| `lcz.lcz_psf_map` | Pervious surface fraction by grid point |
+| `lcz.lcz_height_map` | Building-height values by grid point |
+| `lcz.lcz_svf_map` | Sky view factor values by grid point |
+| `lcz.lcz_ar_map` | Aspect ratio values by grid point |
+| `lcz.lcz_run_metadata` | Run date and study-area metadata |
+| `lcz.lcz_run_steps` | Status and timing of the calculation phases |
+
+The final grid table `lcz.lcz_map` contains at least the columns `gx`, `gy`, `geom`, `lcz_class`, `lcz_name`, `distance_sq`, `svf`, `bsf`, `isf`, `psf`, `height`, and `ar`. Their meanings are:
+
+- `gx`, `gy`: lower-left coordinates of the 100 m classification grid cell.
+- `geom`: grid point geometry.
+- `lcz_class`: Stewart/Oke LCZ class number.
+- `lcz_name`: English LCZ class name.
+- `distance_sq`: weighted distance to the LCZ reference signature.
+- `svf`: sky view factor.
+- `bsf`: building surface fraction.
+- `isf`: impervious surface fraction.
+- `psf`: pervious surface fraction.
+- `height`: building-height value.
+- `ar`: aspect ratio.
+
+### Useful result queries
+
+List the LCZ classes represented in the final dissolved map:
+
+```sql
+SELECT lcz_class, lcz_name
+FROM lcz.lcz_map_dissolved
+ORDER BY lcz_class;
+```
+
+Count classified grid cells per LCZ class:
+
+```sql
+SELECT lcz_class, lcz_name, count(*) AS grid_cells
+FROM lcz.lcz_map
+GROUP BY lcz_class, lcz_name
+ORDER BY lcz_class;
+```
+
+Inspect the result of the latest run:
+
+```sql
+SELECT run_id, start_time, end_time, status
+FROM lcz.lcz_run_metadata
+ORDER BY run_id DESC;
+
+SELECT step_name, status, rows_affected, duration_seconds
+FROM lcz.lcz_run_steps
+WHERE run_id = (SELECT max(run_id) FROM lcz.lcz_run_metadata)
+ORDER BY start_time;
+```
 
 ## Troubleshooting
 

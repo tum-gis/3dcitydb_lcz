@@ -106,14 +106,14 @@ END $$;
 DROP TABLE IF EXISTS lcz.lcz_study_area_hull CASCADE;
 CREATE TABLE lcz.lcz_study_area_hull (
     id   SERIAL PRIMARY KEY,
-    geom geometry(POLYGON)
+    geom geometry(GEOMETRY)
 );
 CREATE INDEX idx_lcz_study_area_hull ON lcz.lcz_study_area_hull USING GIST(geom);
 
 DROP TABLE IF EXISTS lcz.lcz_inner_boundary CASCADE;
 CREATE TABLE lcz.lcz_inner_boundary (
     id   SERIAL PRIMARY KEY,
-    geom geometry(POLYGON)
+    geom geometry(GEOMETRY)
 );
 CREATE INDEX idx_lcz_inner_boundary ON lcz.lcz_inner_boundary USING GIST(geom);
 
