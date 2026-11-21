@@ -12,6 +12,7 @@ This project provides a Docker-based workflow for importing CityGML data into 3D
 - [Common commands](#common-commands)
 - [Running parts of the pipeline manually](#running-parts-of-the-pipeline-manually)
 - [SQL setup](#sql-setup)
+- [Calculation parameters](#calculation-parameters)
 - [Database access](#database-access)
 - [Output](#output)
 - [Troubleshooting](#troubleshooting)
@@ -24,7 +25,7 @@ This project provides a Docker-based workflow for importing CityGML data into 3D
 - CityGML input data with the following requirements:
    - projected coordinate reference system (CRS) like EPSG:25832
    - LOD2 buildings from Open Data Bayern [^3]
-   - landuse and trees (optional) as produced by the FME workspace that you find in the resources folder from ALKIS TN [^4], Einzelbäume [^5] (optional) and DGM1 [^5].
+   - landuse and trees (optional) as produced by the FME workspace that you find in the resources folder from ALKIS TN [^4], Einzelbäume [^5] (optional) and DGM1 [^6].
    
 
 Windows PowerShell examples assume this repository is the current directory:
@@ -90,6 +91,65 @@ Configuration is read from `.env`.
 Keep `.env` private; it contains the database password and should not be committed to Git.
 
 The LCZ setup SQL stores the detected projected SRID in `lcz.lcz_params`. Geographic CRS values such as longitude/latitude CRSs are not supported by the calculation.
+
+### Calculation parameters
+
+The calculation parameters are stored in `lcz.lcz_params`. Their default values are defined in the `INSERT` block of [`sql/01_admin_setup.sql`](./sql/01_admin_setup.sql). After the database setup, inspect or change them through the SQL shell:
+
+```powershell
+docker compose exec citydb psql -U postgres -d postgres
+```
+
+List the current values:
+
+```sql
+SELECT param_name, param_value
+FROM lcz.lcz_params
+ORDER BY param_name;
+```
+
+Change a value with an `UPDATE`, for example, to include terrain in the SVF calculation:
+
+```sql
+UPDATE lcz.lcz_params
+SET param_value = 'true'
+WHERE param_name = 'include_terrain_in_svf';
+```
+
+The table below lists the available calculation parameters and their setup defaults. Distances are in metres, areas in square metres, and ratios are fractions between 0 and 1 unless noted otherwise.
+
+| Parameter | Default | Purpose |
+|---|---:|---|
+| `boundary_buffer` | `60` | Inward buffer used to define the calculation area in meters. |
+| `grid_resolution` | `10` | Side length of the calculation grid cells in meters. |
+| `class_grid_resolution` | `100` | Side length of the grid cells used for LCZ classification in meters. |
+| `tree_pit_radius` | `2.0` | Radius of tree-pit areas excluded from impervious-surface calculations in meters. |
+| `landuse_default_imperv` | `0.40` | Fallback imperviousness ratio when no land-use mapping applies. |
+| `svf_radius` | `60` | Maximum distance sampled along SVF rays in meters. |
+| `svf_directions` | `8` | Number of directions sampled for SVF. |
+| `svf_observer_height` | `2.0` | SVF observer height above ground in meters. |
+| `svf_ray_step` | `2` | Distance between samples along each SVF ray in meters. |
+| `include_trees_in_svf` | `true` | Specifiy whether trees are included as SVF obstacles. |
+| `tree_crown_ratio` | `0.35` | Factor used to estimate tree-crown radius from tree height. |
+| `svf_edge_buffer` | `60` | Search margin around the calculation area for SVF obstacles in meters. |
+| `include_terrain_in_svf` | `false` | Specifies whether terrain is included as an SVF obstacle. |
+| `terrain_grid_spacing` | `20` | Spacing of sampled terrain points when terrain is enabled in meters. |
+| `ar_cell_area` | `10000` | Reference cell area used in the area-ratio calculation in meters sqared. |
+| `forest_cover_threshold` | `0.80` | Tree-cover fraction threshold for the forest-cover correction. |
+| `svf_weight` | `3.0` | Weight of SVF in the LCZ classification distance. |
+| `bsf_weight` | `8.0` | Weight of building surface fraction (BSF). |
+| `isf_weight` | `2.0` | Weight of impervious surface fraction (ISF). |
+| `psf_weight` | `2.0` | Weight of pervious surface fraction (PSF). |
+| `height_weight` | `6.0` | Weight of building height. |
+| `ar_weight` | `4.0` | Weight of aspect ratio (AR). |
+| `svf_norm_min` / `svf_norm_max` | `0.2` / `1.0` | Lower and upper SVF values used for normalization. |
+| `bsf_norm_min` / `bsf_norm_max` | `0.0` / `0.9` | Lower and upper BSF values used for normalization. |
+| `isf_norm_min` / `isf_norm_max` | `0.0` / `1.0` | Lower and upper ISF values used for normalization. |
+| `psf_norm_min` / `psf_norm_max` | `0.0` / `1.0` | Lower and upper PSF values used for normalization. |
+| `height_norm_min` / `height_norm_max` | `2.0` / `50.0` | Lower and upper building heights, in metres, used for normalization. |
+| `ar_norm_min` / `ar_norm_max` | `0.1` / `5.0` | Lower and upper AR values used for normalization. |
+
+`srid` is detected from the 3DCityDB installation and should not be set manually. Re-running the setup with `LCZ_FORCE_REINIT=true` recreates `lcz.lcz_params` and restores the defaults above.
 
 ## Input data
 
