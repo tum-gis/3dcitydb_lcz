@@ -18,6 +18,7 @@ This project provides a Docker-based workflow for importing CityGML data into 3D
 - [Detailed result data](#detailed-result-data)
 - [Troubleshooting](#troubleshooting)
 - [Resetting the installation](#resetting-the-installation)
+- [Contributors](#contributors)
 
 ## Requirements
 
@@ -548,6 +549,10 @@ docker compose up -d
 ```
 
 Using `down -v` permanently removes imported CityGML data and the generated LCZ database contents. Create backups before resetting.
+
+## Contributors
+
+- [@samaneh1948ux](https://github.com/samaneh1948ux) - major code contributions
 
 [^1]: <https://3dcitydb.net>
 [^2]: <https://doi.org/10.1175/BAMS-D-11-00019.1>
