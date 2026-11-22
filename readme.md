@@ -33,7 +33,7 @@ This project provides a Docker-based workflow for importing CityGML data into 3D
 Windows PowerShell examples assume this repository is the current directory:
 
 ```powershell
-cd C:\temp\LCZ\3dcitydb_lcz_docker
+cd 3dcitydb_lcz
 ```
 
 Confirm Docker is available:
@@ -152,6 +152,20 @@ The table below lists the available calculation parameters and their setup defau
 | `ar_norm_min` / `ar_norm_max` | `0.1` / `5.0` | Lower and upper AR values used for normalization. |
 
 `srid` is detected from the 3DCityDB installation and should not be set manually. Re-running the setup with `LCZ_FORCE_REINIT=true` recreates `lcz.lcz_params` and restores the defaults above.
+
+## Classification rules
+
+Each 100 m cell receives the LCZ class whose reference values (Stewart and Oke 2012, Table 3) are closest to its six measured parameters. The weights and the normalization limits are in `lcz.lcz_params`.
+
+- **Ties.** If two classes have the same distance, the lower class number is chosen. This occurs between LCZ D (14) and LCZ F (16).
+- **Building fraction limit.** Cells with BSF below 0.10 can only receive the land cover classes 11 to 17.
+- **Aspect ratio.** Where AR is empty (no buildings), the AR term is left out of the distance.
+
+Parameter notes:
+
+- Use 8 or 16 for `svf_directions`.
+- `ar_cell_area` must equal `class_grid_resolution` squared.
+- Keep `boundary_buffer` equal to or larger than `svf_radius`.
 
 ## Input data
 
@@ -549,6 +563,10 @@ docker compose up -d
 ```
 
 Using `down -v` permanently removes imported CityGML data and the generated LCZ database contents. Create backups before resetting.
+
+## Citation
+
+A paper describing the method is in preparation. Until it is published, please cite this repository.
 
 ## Contributors
 
